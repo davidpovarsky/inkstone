@@ -1,0 +1,97 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-ipa.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipa:
+    name: Build unsigned Inkstone IPA
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Show Apple toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install XcodeGen
+        run: |
+          brew update
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild \
+            -project Inkstone.xcodeproj \
+            -scheme Inkstone \
+            -resolvePackageDependencies
+
+      - name: Build iOS app without signing
+        run: |
+          mkdir -p build
+          set -o pipefail
+          xcodebuild \
+            -project Inkstone.xcodeproj \
+            -scheme Inkstone \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            DEVELOPMENT_TEAM='' \
+            clean build 2>&1 | tee build/xcodebuild.log
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name 'Inkstone.app' -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "Inkstone.app was not produced."
+            exit 1
+          fi
+
+          rm -rf build/Payload
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/Inkstone.app
+
+          cd build
+          /usr/bin/zip -qry Inkstone-unsigned.ipa Payload
+          shasum -a 256 Inkstone-unsigned.ipa > Inkstone-unsigned.ipa.sha256
+          ls -lh Inkstone-unsigned.ipa Inkstone-unsigned.ipa.sha256
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Inkstone-unsigned-IPA
+          path: |
+            build/Inkstone-unsigned.ipa
+            build/Inkstone-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Inkstone-iOS-build-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 14
